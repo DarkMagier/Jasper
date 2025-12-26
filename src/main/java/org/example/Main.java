@@ -7,11 +7,33 @@ import net.bytebuddy.implementation.FixedValue;
 import net.bytebuddy.matcher.ElementMatchers;
 
 import org.bytedeco.ffmpeg.global.avutil;
+import org.bytedeco.javacpp.BytePointer;
+import org.bytedeco.javacpp.Pointer;
+import org.bytedeco.javacpp.PointerPointer;
+import org.bytedeco.llvm.LLVM.*;
 
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+
+import static org.bytedeco.llvm.global.LLVM.*;
+import static org.bytedeco.llvm.global.LLVM.LLVMAddFunction;
+import static org.bytedeco.llvm.global.LLVM.LLVMAppendBasicBlock;
+import static org.bytedeco.llvm.global.LLVM.LLVMBuildCall2;
+import static org.bytedeco.llvm.global.LLVM.LLVMBuildGlobalStringPtr;
+import static org.bytedeco.llvm.global.LLVM.LLVMBuildRet;
+import static org.bytedeco.llvm.global.LLVM.LLVMConstInt;
+import static org.bytedeco.llvm.global.LLVM.LLVMDisposeBuilder;
+import static org.bytedeco.llvm.global.LLVM.LLVMDisposeMessage;
+import static org.bytedeco.llvm.global.LLVM.LLVMDisposeModule;
+import static org.bytedeco.llvm.global.LLVM.LLVMFunctionType;
+import static org.bytedeco.llvm.global.LLVM.LLVMInt8Type;
+import static org.bytedeco.llvm.global.LLVM.LLVMPointerType;
+import static org.bytedeco.llvm.global.LLVM.LLVMPositionBuilderAtEnd;
+import static org.bytedeco.llvm.global.LLVM.LLVMPrintModuleToFile;
+import static org.bytedeco.llvm.global.LLVM.LLVMReturnStatusAction;
+import static org.bytedeco.llvm.global.LLVM.LLVMVerifyModule;
 
 public class Main {
 
@@ -65,5 +87,74 @@ public class Main {
             System.out.println("Bytedeco FAILED ❌");
             t.printStackTrace();
         }
+        // 1) 直接打印 hello world
+        System.out.println("hello, world");
+
+        // 2) 生成一个 out.ll（里面也会 puts("hello, world")）
+        LLVMModuleRef mod = LLVMModuleCreateWithName("jasper");
+        LLVMBuilderRef builder = LLVMCreateBuilder();
+
+        // ---- types ----
+        LLVMTypeRef i32 = LLVMInt32Type();
+        LLVMTypeRef i8 = LLVMInt8Type();
+        LLVMTypeRef i8Ptr = LLVMPointerType(i8, 0);
+
+        // ---- declare: i32 @puts(i8*) ----
+        PointerPointer<LLVMTypeRef> putsParams = new PointerPointer<>(1);
+        putsParams.put(0, i8Ptr);
+        LLVMTypeRef putsTy = LLVMFunctionType(i32, putsParams, 1, 0);
+        LLVMValueRef putsFn = LLVMAddFunction(mod, "puts", putsTy);
+
+        // ---- define: i32 @main() ----
+        LLVMTypeRef mainTy = LLVMFunctionType(i32, (PointerPointer<?>) null, 0, 0);
+        LLVMValueRef mainFn = LLVMAddFunction(mod, "main", mainTy);
+        LLVMBasicBlockRef entry = LLVMAppendBasicBlock(mainFn, "entry");
+        LLVMPositionBuilderAtEnd(builder, entry);
+
+        // ---- global string "hello, world" ----
+        LLVMValueRef str = LLVMBuildGlobalStringPtr(builder, "hello, world", ".str");
+
+        // call puts(str)
+        PointerPointer<LLVMValueRef> callArgs = new PointerPointer<>(1);
+        callArgs.put(0, str);
+
+        LLVMBuildCall2(
+                builder,
+                putsTy,     // 函数类型
+                putsFn,     // callee
+                callArgs,   // 参数数组
+                1,
+                ""
+        );
+
+        // return 0
+        LLVMBuildRet(builder, LLVMConstInt(i32, 0, 0));
+
+        // verify
+        BytePointer err = new BytePointer((Pointer) null);
+        if (LLVMVerifyModule(mod, LLVMReturnStatusAction, err) != 0) {
+            System.err.println("verify failed: " + err.getString());
+            LLVMDisposeMessage(err);
+            cleanup(builder, mod);
+            return;
+        }
+
+        // print to out.ll
+        BytePointer outErr = new BytePointer((Pointer) null);
+        int rc = LLVMPrintModuleToFile(mod, "out.ll", outErr);
+        if (rc != 0) {
+            System.err.println("print failed: " + outErr.getString());
+            LLVMDisposeMessage(outErr);
+            cleanup(builder, mod);
+            return;
+        }
+
+        cleanup(builder, mod);
+        System.out.println("Wrote out.ll");
+    }
+
+    static void cleanup(LLVMBuilderRef builder, LLVMModuleRef mod) {
+        LLVMDisposeBuilder(builder);
+        LLVMDisposeModule(mod);
     }
 }

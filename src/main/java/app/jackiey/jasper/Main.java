@@ -1,4 +1,4 @@
-package org.example;
+package app.jackiey.jasper;
 
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.ClassFileVersion;

@@ -19,6 +19,7 @@
             <artifactId>antlr4-runtime</artifactId>
             <version>4.13.2</version>
         </dependency>
+
         <dependency>
             <groupId>org.bytedeco</groupId>
             <artifactId>javacv-platform</artifactId>
@@ -30,16 +31,45 @@
             <artifactId>llvm-platform</artifactId>
             <version>20.1.7-1.5.12</version>
         </dependency>
+
         <dependency>
             <groupId>net.bytebuddy</groupId>
             <artifactId>byte-buddy</artifactId>
             <version>1.18.3</version>
         </dependency>
+
         <dependency>
             <groupId>net.bytebuddy</groupId>
             <artifactId>byte-buddy-agent</artifactId>
             <version>1.18.3</version>
         </dependency>
-
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <source>${maven.compiler.source}</source>
+                    <target>${maven.compiler.target}</target>
+                    <encoding>${project.build.sourceEncoding}</encoding>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <!-- 固定入口，避免被 IDE/命令行的 -Dexec.mainClass 污染 -->
+                    <mainClass>app.jackiey.jasper.cli.JasperMain</mainClass>
+
+                    <!-- 有些 native/agent 会起后台线程，开这个更稳 -->
+                    <cleanupDaemonThreads>true</cleanupDaemonThreads>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

@@ -1,4 +1,4 @@
-package app.jackiey.jasper;
+package app.jackiey.jasper.demo;
 
 import net.bytebuddy.ByteBuddy;
 import net.bytebuddy.ClassFileVersion;
@@ -12,7 +12,6 @@ import org.bytedeco.javacpp.Pointer;
 import org.bytedeco.javacpp.PointerPointer;
 import org.bytedeco.llvm.LLVM.*;
 
-import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -35,7 +34,7 @@ import static org.bytedeco.llvm.global.LLVM.LLVMPrintModuleToFile;
 import static org.bytedeco.llvm.global.LLVM.LLVMReturnStatusAction;
 import static org.bytedeco.llvm.global.LLVM.LLVMVerifyModule;
 
-public class Main {
+public class inittest {
 
     public interface Greeter {
         String greet();
@@ -60,7 +59,7 @@ public class Main {
             System.out.println("Saved classes under: " + outDir.toAbsolutePath());
 
             Class<? extends Greeter> type = unloaded
-                    .load(Main.class.getClassLoader())
+                    .load(inittest.class.getClassLoader())
                     .getLoaded()
                     .asSubclass(Greeter.class);
 

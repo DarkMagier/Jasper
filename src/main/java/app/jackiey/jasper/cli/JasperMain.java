@@ -1,16 +1,18 @@
 package app.jackiey.jasper.cli;
 
+import app.jackiey.jasper.backend.api.Artifact;
+import app.jackiey.jasper.backend.api.Target;
+import app.jackiey.jasper.backend.targets.jvm_bytebuddy.ByteBuddyBackend;
+import app.jackiey.jasper.backend.targets.native_ll.LlvmBackend;
 import app.jackiey.jasper.frontend.diag.Diagnostic;
 import app.jackiey.jasper.frontend.diag.DiagnosticSink;
 import app.jackiey.jasper.frontend.parse.ParseFacade;
 import app.jackiey.jasper.frontend.parse.ParseResult;
-import app.jackiey.jasper.backend.api.Artifact;
-import app.jackiey.jasper.backend.api.Target;
-import app.jackiey.jasper.backend.cgir.CgProgram;
-import app.jackiey.jasper.backend.lower.AstToCgir;
-import app.jackiey.jasper.backend.targets.jvm_bytebuddy.ByteBuddyBackend;
-import app.jackiey.jasper.backend.targets.native_ll.LlvmTextBackend;
-import app.jackiey.jasper.middle.passes.PassManager;
+import app.jackiey.jasper.middle.checker.AstChecker;
+import app.jackiey.jasper.middle.hir.HirProgram;
+import app.jackiey.jasper.middle.lowering.AstToHirLowering;
+import app.jackiey.jasper.middle.lowering.HirToMirLowering;
+import app.jackiey.jasper.middle.mir.MirProgram;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -18,12 +20,10 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 
 /**
- * Minimal CLI that compiles a tiny Jasper program from foo.jas (default).
- *
- * Future growth:
- * - Replace ParseFacade implementation with ANTLR wrapper.
- * - Add AST->HIR->MIR passes in PassManager.
- * - Add more backends under backend/targets.
+ * Jasper CLI (demo stage).
+ * <p>
+ * Pipeline:
+ *   source -> AST -> Checker -> HIR -> MIR -> (ByteBuddy | ByteDeco LLVM)
  */
 public final class JasperMain {
 
@@ -35,70 +35,63 @@ public final class JasperMain {
 
         ParseResult parsed = new ParseFacade().parse(source, diag);
         if (diag.hasErrors()) {
-            for (Diagnostic d : diag.all()) System.err.println(d.renderOneLine());
-            System.exit(1);
+            printDiagsAndExit(diag);
             return;
         }
 
-        // Pipeline placeholder: today AST -> CGIR directly (kept in PassManager for future extension).
-        PassManager pm = new PassManager();
-        // In the future: pm.add(new AstToHirPass()); pm.add(new HirToMirPass()); ...
-
-        // Shared lowering: AST -> CGIR (both JVM and LLVM backends use it)
-        CgProgram cg = new AstToCgir().lower(parsed.program, diag);
+        AstChecker.CheckedProgram checked = new AstChecker().check(parsed.program, diag);
         if (diag.hasErrors()) {
-            for (Diagnostic d : diag.all()) System.err.println(d.renderOneLine());
-            System.exit(1);
+            printDiagsAndExit(diag);
             return;
         }
 
-        Target target = opt.target;
+        HirProgram hir = new AstToHirLowering().lower(checked);
+        MirProgram mir = new HirToMirLowering().lower(hir);
+
         Artifact artifact;
-        switch (target) {
-            case JVM:
-                artifact = new ByteBuddyBackend().emit(cg, opt);
-                break;
-            case LL:
-            case NATIVE:
-                artifact = new LlvmTextBackend().emit(cg, opt);
-                break;
-            default:
-                throw new IllegalStateException("Unknown target: " + target);
+        if (opt.target == Target.JVM) {
+            ByteBuddyBackend be = new ByteBuddyBackend();
+            artifact = be.emit(mir, opt);
+            if (opt.run) {
+                be.runMain();
+            }
+        } else {
+            LlvmBackend be = new LlvmBackend();
+            artifact = be.emit(mir, opt);
+            if (opt.run && opt.target == Target.NATIVE) {
+                Process p = new ProcessBuilder(artifact.path.toAbsolutePath().toString())
+                        .inheritIO()
+                        .start();
+                int code = p.waitFor();
+                System.exit(code);
+            }
         }
 
         if (artifact.path != null) {
             System.out.println("artifact: " + artifact.path.toAbsolutePath());
         }
+    }
 
-        if (opt.run && target == Target.JVM) {
-            ((ByteBuddyBackend) artifact.backend).runMain();
-        } else if (opt.run && target == Target.NATIVE) {
-            if (artifact.path == null) {
-                System.err.println("No native artifact produced.");
-                System.exit(2);
-            }
-            Process p = new ProcessBuilder(artifact.path.toAbsolutePath().toString())
-                    .inheritIO()
-                    .start();
-            int code = p.waitFor();
-            System.exit(code);
+    private static void printDiagsAndExit(DiagnosticSink diag) {
+        for (Diagnostic d : diag.all()) {
+            System.err.println(d.renderOneLine());
         }
+        System.exit(1);
     }
 
     private static String loadSource(CliOptions opt) throws Exception {
-        if (opt.code != null) {
-            return opt.code;
-        }
+        if (opt.code != null) return opt.code;
         if (opt.inputFile != null) {
             byte[] bytes = Files.readAllBytes(opt.inputFile);
             return new String(bytes, StandardCharsets.UTF_8);
         }
-        // Default: read ./foo.jas if present, otherwise fallback demo program.
-        Path defaultFile = Paths.get("foo.jas");
-        if (Files.exists(defaultFile) && Files.isRegularFile(defaultFile)) {
-            byte[] bytes = Files.readAllBytes(defaultFile);
+        // default: read ./foo.jas if present
+        Path p = Paths.get("foo.jas");
+        if (Files.exists(p) && Files.isRegularFile(p)) {
+            byte[] bytes = Files.readAllBytes(p);
             return new String(bytes, StandardCharsets.UTF_8);
         }
+        // last-resort fallback
         return "foo()";
     }
 
@@ -150,15 +143,12 @@ public final class JasperMain {
         }
 
         private static void printHelpAndExit() {
-            System.out.println("Jasper demo compiler (minimal)");
-            System.out.println("  --code \"foo()\"          inline source");
-            System.out.println("  --in path/to/file        read source from file");
-            System.out.println("  --target jvm|ll|native   output target (default: jvm)");
-            System.out.println("  --out path               output path (ll/native) (default: target/jasper/...)");
+            System.out.println("Jasper demo compiler");
+            System.out.println("  --in foo.jas             read source file (default: ./foo.jas)");
+            System.out.println("  --code \"...\"             inline source");
+            System.out.println("  --target jvm|ll|native   output target");
+            System.out.println("  --out path               output path (ll/native) (default: target/jasper/...) ");
             System.out.println("  --run                    run the compiled program (jvm/native)");
-            System.out.println();
-            System.out.println("Default input: reads ./foo.jas if it exists; otherwise uses \"foo()\".");
-            System.out.println("Supported syntax (stub): foo() | fn foo() { } foo()");
             System.exit(0);
         }
     }

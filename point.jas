@@ -1,0 +1,20 @@
+class Point {
+  public var x: int64;
+  public var y: int64;
+
+  constructor(a:int64, b:int64) {
+    this.x = a;
+    this.y = b;
+  }
+
+  function sum(): int64 {
+    return this.x + this.y;
+  }
+}
+
+function main() {
+  var p = new Point(1, 2);
+  print(p.x, p.y, p.sum());
+}
+
+main();

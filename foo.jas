@@ -1,0 +1,5 @@
+function foo(a:int64, b:int64) {
+  print(a, b, a + b);
+}
+
+foo(1, 4)

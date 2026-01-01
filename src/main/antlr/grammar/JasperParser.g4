@@ -306,7 +306,7 @@ topLevelVariableDeclaration
  */
 //graph::softKeyword #@keep #@rule 说明：软关键字统一匹配器（参数化）。
 softKeyword[String kw]
-    : { _input.LT(1).getText().equals(kw) }? Identifier
+    : { _input.LT(1).getText().equals($kw) }? Identifier
     ;
 
 /*

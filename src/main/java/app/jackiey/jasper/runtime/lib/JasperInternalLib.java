@@ -9,18 +9,13 @@ public final class JasperInternalLib {
         System.out.println(s);
     }
 
-    // historical demo helper: print(a,b,a+b)
+    // 目标：print(a,b,a+b)
     public static void printFoo(long a, long b) {
         long c = a + b;
         System.out.println(a + " " + b + " " + c);
     }
 
-    // MIR-friendly: print(a,b,c)
-    public static void print3(long a, long b, long c) {
-        System.out.println(a + " " + b + " " + c);
-    }
-
-    // reflect: 0 args
+    // 反射调用：0 参数
     public static void callGeneratedStatic(String className, String methodName) {
         try {
             Class<?> c = Class.forName(className);
@@ -31,7 +26,7 @@ public final class JasperInternalLib {
         }
     }
 
-    // reflect: 2 long args
+    // 反射调用：2 个 long 参数
     public static void callGeneratedStatic2Long(String className, String methodName, long a, long b) {
         try {
             Class<?> c = Class.forName(className);

@@ -4,6 +4,7 @@ import app.jackiey.jasper.frontend.ast.nodes.Program;
 import app.jackiey.jasper.frontend.diag.DiagnosticSink;
 import app.jackiey.jasper.frontend.parse.antlr.AntlrDiagnosticListener;
 import app.jackiey.jasper.frontend.parse.antlr.AstBuilder;
+import app.jackiey.jasper.frontend.sema.SemaFacade;
 import gen.antlr.jasper.JasperLexer;
 import gen.antlr.jasper.JasperParser;
 import org.antlr.v4.runtime.CharStreams;
@@ -32,6 +33,10 @@ public final class ParseFacade {
         }
 
         Program program = new AstBuilder(tokens, diag).build(tree);
+
+        // v0.0.04：引入最小语义检查（局部变量 definite assignment + 空安全 + where NonNull）。
+        // 设计：仅对 FunctionDecl.bodyAst != null 的函数生效；不影响旧用例。
+        new SemaFacade().run(program, diag);
         return new ParseResult(program);
     }
 }

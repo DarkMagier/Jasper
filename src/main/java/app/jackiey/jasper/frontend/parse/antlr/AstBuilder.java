@@ -96,18 +96,29 @@ public final class AstBuilder {
 
         @Override
         public Object visitTopDeclarationFunction(JasperParser.TopDeclarationFunctionContext ctx) {
-            // 维持原有最小 function AST（FunctionDecl），但 body pattern check 改为 parse-tree 驱动
+            // v0.0.04：保留原有最小 lowering 所需字段，同时把更多语法信息接入 AST。
             Identifier name = new Identifier(ctx.name.getText(), spanFromToken(ctx.name));
+
+            TypeParameters tparams = ctx.tparams != null ? buildTypeParameters(ctx.tparams) : null;
+            WhereClause whereClause = ctx.where != null ? buildWhereClause(ctx.where) : null;
+            TypeRef returnType = ctx.ret != null ? buildTypeRef(ctx.ret.typeExpr()) : null;
 
             List<FunctionDecl.Param> params = new ArrayList<>();
             for (JasperParser.TypedBindingContext p : ctx.params) {
                 String pn = p.Identifier().getText();
-                String ty = p.typeExpr().getText();
-                params.add(new FunctionDecl.Param(pn, ty));
+                String tyName = p.typeExpr().getText();
+                TypeRef ty = buildTypeRef(p.typeExpr());
+                params.add(new FunctionDecl.Param(pn, tyName, ty));
+            }
+
+            BlockStmt bodyAst = null;
+            if (ctx.body instanceof JasperParser.MethodBodyBlockContext) {
+                JasperParser.BlockContext block = ((JasperParser.MethodBodyBlockContext) ctx.body).block();
+                bodyAst = (BlockStmt) visit(block);
             }
 
             boolean patternOk = isPrintFooPattern(ctx.body, params);
-            return new FunctionDecl(name, params, patternOk, span(ctx));
+            return new FunctionDecl(name, params, patternOk, tparams, whereClause, returnType, bodyAst, span(ctx));
         }
 
         @Override
@@ -115,8 +126,10 @@ public final class AstBuilder {
             if (ctx.normalClassDeclaration() != null) {
                 return visit(ctx.normalClassDeclaration());
             }
-            // enum 暂不支持（本轮目标是 class/interface）
-            diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "enum not supported yet", span(ctx));
+            if (ctx.enumDeclaration() != null) {
+                return visit(ctx.enumDeclaration());
+            }
+            diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "unknown top-level class-like declaration", span(ctx));
             return null;
         }
 
@@ -150,11 +163,16 @@ public final class AstBuilder {
         public Object visitNormalClassDeclaration(JasperParser.NormalClassDeclarationContext ctx) {
             Identifier name = new Identifier(ctx.name.getText(), spanFromToken(ctx.name));
 
+            TypeParameters tparams = null;
+            if (ctx.tparams != null) {
+                tparams = (TypeParameters) visit(ctx.tparams);
+            }
+
             List<TypeRef> impls = new ArrayList<>();
             if (ctx.sis != null) {
                 // superinterfaces: Implements typePostfix (',' typePostfix)* ','?
                 for (JasperParser.TypePostfixContext t : ctx.sis.typePostfix()) {
-                    impls.add(new TypeRef(t.getText(), span(t)));
+                    impls.add(buildTypeRefFromPostfix(t));
                 }
             }
 
@@ -175,17 +193,37 @@ public final class AstBuilder {
                     }
                 } else if (d instanceof JasperParser.MemberEmptyContext) {
                     // ignore
+                } else if (d instanceof JasperParser.MemberEnumContext) {
+                    JasperParser.EnumDeclarationContext ed = ((JasperParser.MemberEnumContext) d).decl;
+                    Object e = visit(ed);
+                    if (e instanceof EnumDecl) {
+                        members.add((EnumDecl) e);
+                    } else if (e != null) {
+                        diag.error(ErrorCode.INTERNAL_ERROR, "enum visitor returned unexpected type", span(ed));
+                    }
                 } else {
                     diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "unsupported class member (only field/method supported in this stage)", span(d));
                 }
             }
 
-            return new ClassDecl(name, impls, members, span(ctx));
+            return new ClassDecl(name, tparams, impls, members, span(ctx));
         }
 
         @Override
         public Object visitNormalInterfaceDeclaration(JasperParser.NormalInterfaceDeclarationContext ctx) {
             Identifier name = new Identifier(ctx.name.getText(), spanFromToken(ctx.name));
+
+            TypeParameters tparams = null;
+            if (ctx.tparams != null) {
+                tparams = (TypeParameters) visit(ctx.tparams);
+            }
+
+            List<TypeRef> exts = new ArrayList<>();
+            if (ctx.exts != null) {
+                for (JasperParser.TypePostfixContext t : ctx.exts.typePostfix()) {
+                    exts.add(buildTypeRefFromPostfix(t));
+                }
+            }
 
             List<MethodDecl> methods = new ArrayList<>();
             for (JasperParser.InterfaceMemberDeclarationContext d : ctx.body.interfaceMemberDeclaration()) {
@@ -199,13 +237,23 @@ public final class AstBuilder {
                     }
                 } else if (d instanceof JasperParser.InterfaceMemberEmptyContext) {
                     // ignore
+                } else if (d instanceof JasperParser.InterfaceMemberEnumContext) {
+                    JasperParser.EnumDeclarationContext ed = ((JasperParser.InterfaceMemberEnumContext) d).decl;
+                    // 允许接口内嵌 enum（Java 类似写法）
+                    Object e = visit(ed);
+                    if (e instanceof EnumDecl) {
+                        // interface 目前只保存方法列表，为简化：暂不挂载到 methods 中。
+                        // 若未来需要，可扩展 InterfaceDecl 增加 members 列表。
+                    } else if (e != null) {
+                        diag.error(ErrorCode.INTERNAL_ERROR, "enum visitor returned unexpected type", span(ed));
+                    }
                 } else {
                     // 其他接口成员（常量、抽象方法 header、属性等）本轮不做
                     diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "unsupported interface member (only function-style methodDeclaration supported)", span(d));
                 }
             }
 
-            return new InterfaceDecl(name, methods, span(ctx));
+            return new InterfaceDecl(name, tparams, exts, methods, span(ctx));
         }
 
         @Override
@@ -222,7 +270,7 @@ public final class AstBuilder {
                 Identifier n = new Identifier(b.name.getText(), spanFromToken(b.name));
                 TypeRef ty = null;
                 if (b.typeRef != null) {
-                    ty = new TypeRef(b.typeRef.getText(), span(b.typeRef));
+                    ty = buildTypeRef(b.typeRef);
                 }
                 out.add(new FieldDecl(kind, n, ty, span(vd)));
             }
@@ -236,13 +284,13 @@ public final class AstBuilder {
             List<MethodDecl.Param> params = new ArrayList<>();
             for (JasperParser.TypedBindingContext p : ctx.params) {
                 Identifier pn = new Identifier(p.Identifier().getText(), spanFromToken(p.Identifier().getSymbol()));
-                TypeRef ty = new TypeRef(p.typeExpr().getText(), span(p.typeExpr()));
+                TypeRef ty = buildTypeRef(p.typeExpr());
                 params.add(new MethodDecl.Param(pn, ty));
             }
 
             TypeRef ret = null;
             if (ctx.ret != null) {
-                ret = new TypeRef(ctx.ret.typeExpr().getText(), span(ctx.ret.typeExpr()));
+                ret = buildTypeRef(ctx.ret.typeExpr());
             }
 
             boolean hasBlock = (ctx.body instanceof JasperParser.MethodBodyBlockContext);
@@ -254,6 +302,454 @@ public final class AstBuilder {
             // 本轮只支持 function-style（符合你给的测试要求）
             diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "java-style methodDeclaration not supported yet (use function-style)", span(ctx));
             return null;
+        }
+
+        // ===========================
+        // enum
+        // ===========================
+
+        @Override
+        public Object visitEnumDeclaration(JasperParser.EnumDeclarationContext ctx) {
+            Identifier name = new Identifier(ctx.name.getText(), spanFromToken(ctx.name));
+
+            List<TypeRef> impls = new ArrayList<>();
+            if (ctx.sis != null) {
+                for (JasperParser.TypePostfixContext t : ctx.sis.typePostfix()) {
+                    impls.add(buildTypeRefFromPostfix(t));
+                }
+            }
+
+            List<EnumDecl.EnumConstant> constants = new ArrayList<>();
+            List<ClassMember> bodyMembers = new ArrayList<>();
+
+            JasperParser.EnumBodyContext body = ctx.body;
+            if (body != null) {
+                if (body.enumConstant() != null) {
+                    for (JasperParser.EnumConstantContext ec : body.enumConstant()) {
+                        Object c = visit(ec);
+                        if (c instanceof EnumDecl.EnumConstant) {
+                            constants.add((EnumDecl.EnumConstant) c);
+                        }
+                    }
+                }
+
+                if (body.enumBodyDeclarations() != null) {
+                    @SuppressWarnings("unchecked")
+                    List<ClassMember> ms = (List<ClassMember>) visit(body.enumBodyDeclarations());
+                    bodyMembers.addAll(ms);
+                }
+            }
+
+            return new EnumDecl(name, impls, constants, bodyMembers, span(ctx));
+        }
+
+        @Override
+        public Object visitEnumConstant(JasperParser.EnumConstantContext ctx) {
+            // modifier* Identifier arguments? classBody?
+            Identifier name = new Identifier(ctx.Identifier().getText(), spanFromToken(ctx.Identifier().getSymbol()));
+            boolean hasArgs = ctx.arguments() != null;
+            boolean hasBody = ctx.classBody() != null;
+            return new EnumDecl.EnumConstant(name, hasArgs, hasBody);
+        }
+
+        @Override
+        public Object visitEnumBodyDeclarations(JasperParser.EnumBodyDeclarationsContext ctx) {
+            // ';' classBodyDeclaration*
+            List<ClassMember> members = new ArrayList<>();
+            for (JasperParser.ClassBodyDeclarationContext d : ctx.classBodyDeclaration()) {
+                if (d instanceof JasperParser.MemberFieldContext) {
+                    JasperParser.FieldDeclarationContext fd = ((JasperParser.MemberFieldContext) d).decl;
+                    @SuppressWarnings("unchecked")
+                    List<FieldDecl> fields = (List<FieldDecl>) visit(fd);
+                    members.addAll(fields);
+                } else if (d instanceof JasperParser.MemberMethodContext) {
+                    JasperParser.MethodDeclarationContext md = ((JasperParser.MemberMethodContext) d).decl;
+                    Object m = visit(md);
+                    if (m instanceof MethodDecl) {
+                        members.add((MethodDecl) m);
+                    }
+                } else if (d instanceof JasperParser.MemberEnumContext) {
+                    JasperParser.EnumDeclarationContext ed = ((JasperParser.MemberEnumContext) d).decl;
+                    Object e = visit(ed);
+                    if (e instanceof EnumDecl) {
+                        members.add((EnumDecl) e);
+                    }
+                } else if (d instanceof JasperParser.MemberEmptyContext) {
+                    // ignore
+                } else {
+                    diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "unsupported enum body member", span(d));
+                }
+            }
+            return members;
+        }
+
+        // ===========================
+        // types (泛型/类型参数/类型实参)
+        // ===========================
+
+        private TypeRef buildTypeRef(JasperParser.TypeExprContext ctx) {
+            TypeExpr e = (TypeExpr) visit(ctx);
+            return new TypeRef(e, span(ctx));
+        }
+
+        private TypeRef buildTypeRefFromPostfix(JasperParser.TypePostfixContext ctx) {
+            TypePostfix p = (TypePostfix) visit(ctx);
+            return new TypeRef(new TypeExpr(java.util.Arrays.asList(p)), span(ctx));
+        }
+
+        /**
+         * v0.0.04：函数/类/接口的泛型参数入口。
+         *
+         * 说明：这只是一个薄包装，底层仍然... a real TypeParameters AST.
+         */
+        private TypeParameters buildTypeParameters(JasperParser.TypeParametersContext ctx) {
+            return (TypeParameters) visit(ctx);
+        }
+
+        /**
+         * v0.0.04：where 子句入口：where T is NonNull, ...
+         */
+        private WhereClause buildWhereClause(JasperParser.WhereClauseContext ctx) {
+            return (WhereClause) visit(ctx);
+        }
+
+        @Override
+        public Object visitTypeExpression(JasperParser.TypeExpressionContext ctx) {
+            List<TypePostfix> alts = new ArrayList<>();
+            for (JasperParser.TypePostfixContext p : ctx.typePostfix()) {
+                alts.add((TypePostfix) visit(p));
+            }
+            return new TypeExpr(alts);
+        }
+
+        @Override
+        public Object visitTypePostfix(JasperParser.TypePostfixContext ctx) {
+            TypeAtom atom = (TypeAtom) visit(ctx.typeAtom());
+            List<TypeSuffix> suffixes = new ArrayList<>();
+            for (JasperParser.TypeSuffixContext s : ctx.typeSuffix()) {
+                suffixes.add((TypeSuffix) visit(s));
+            }
+            List<TypeQualifierKind> qs = new ArrayList<>();
+            for (JasperParser.TypeQualifierContext q : ctx.typeQualifier()) {
+                qs.add((TypeQualifierKind) visit(q));
+            }
+            return new TypePostfix(atom, suffixes, qs);
+        }
+
+        @Override
+        public Object visitTypeAtomNode(JasperParser.TypeAtomNodeContext ctx) {
+            String prefix = null;
+            if (ctx.typePrefix() != null) {
+                prefix = ctx.typePrefix().getText();
+            }
+            List<String> sms = new ArrayList<>();
+            for (JasperParser.TypeSoftModifierContext sm : ctx.typeSoftModifier()) {
+                sms.add(sm.getText());
+            }
+            TypeAtomBase base = (TypeAtomBase) visit(ctx.typeAtomBase());
+            return new TypeAtom(prefix, sms, base);
+        }
+
+        @Override
+        public Object visitTypeAtomNodePrimitive(JasperParser.TypeAtomNodePrimitiveContext ctx) {
+            return new TypeAtomBase.Primitive(ctx.primitiveType().getText());
+        }
+
+        @Override
+        public Object visitTypeAtomNodeString(JasperParser.TypeAtomNodeStringContext ctx) {
+            return new TypeAtomBase.Primitive("String");
+        }
+
+        @Override
+        public Object visitTypeAtomNodeBytes(JasperParser.TypeAtomNodeBytesContext ctx) {
+            return new TypeAtomBase.Primitive("Bytes");
+        }
+
+        @Override
+        public Object visitTypeAtomNodeRegex(JasperParser.TypeAtomNodeRegexContext ctx) {
+            return new TypeAtomBase.Primitive("Regex");
+        }
+
+        @Override
+        public Object visitTypeAtomNodeAny(JasperParser.TypeAtomNodeAnyContext ctx) {
+            return new TypeAtomBase.Primitive("Any");
+        }
+
+        @Override
+        public Object visitTypeAtomNodeUnit(JasperParser.TypeAtomNodeUnitContext ctx) {
+            return new TypeAtomBase.Primitive("Unit");
+        }
+
+        @Override
+        public Object visitTypeAtomNodeGroup(JasperParser.TypeAtomNodeGroupContext ctx) {
+            return new TypeAtomBase.Group((TypeExpr) visit(ctx.typeExpr()));
+        }
+
+        @Override
+        public Object visitTypeAtomNodeTuple(JasperParser.TypeAtomNodeTupleContext ctx) {
+            List<TypeExpr> elems = new ArrayList<>();
+            for (JasperParser.TypeExprContext t : ctx.typeExpr()) {
+                elems.add((TypeExpr) visit(t));
+            }
+            return new TypeAtomBase.Tuple(elems);
+        }
+
+        @Override
+        public Object visitTypeAtomNodeIdentifier(JasperParser.TypeAtomNodeIdentifierContext ctx) {
+            TypeArguments args = null;
+            if (ctx.typeArguments() != null) {
+                args = (TypeArguments) visit(ctx.typeArguments());
+            }
+            return new TypeAtomBase.Identifier(ctx.Identifier().getText(), args);
+        }
+
+        @Override
+        public Object visitTypeSuffixDot(JasperParser.TypeSuffixDotContext ctx) {
+            TypeArguments args = null;
+            if (ctx.typeArguments() != null) {
+                args = (TypeArguments) visit(ctx.typeArguments());
+            }
+            return new TypeSuffix.Dot(ctx.Identifier().getText(), args);
+        }
+
+        @Override
+        public Object visitTypeSuffixArray(JasperParser.TypeSuffixArrayContext ctx) {
+            return new TypeSuffix.Array();
+        }
+
+        @Override
+        public Object visitTypeQualNullCoalesceToken(JasperParser.TypeQualNullCoalesceTokenContext ctx) {
+            return TypeQualifierKind.NULL_COALESCE;
+        }
+
+        @Override
+        public Object visitTypeQualNullCoalesceSplit(JasperParser.TypeQualNullCoalesceSplitContext ctx) {
+            return TypeQualifierKind.NULL_COALESCE;
+        }
+
+        @Override
+        public Object visitTypeQualNullable(JasperParser.TypeQualNullableContext ctx) {
+            return TypeQualifierKind.NULLABLE;
+        }
+
+        @Override
+        public Object visitTypeQualNonNull(JasperParser.TypeQualNonNullContext ctx) {
+            return TypeQualifierKind.NON_NULL;
+        }
+
+        @Override
+        public Object visitTypeArguments(JasperParser.TypeArgumentsContext ctx) {
+            List<TypeArgument> args = new ArrayList<>();
+            for (JasperParser.TypeArgumentContext a : ctx.typeArgument()) {
+                args.add((TypeArgument) visit(a));
+            }
+            return new TypeArguments(args);
+        }
+
+        @Override
+        public Object visitTypeArgumentType(JasperParser.TypeArgumentTypeContext ctx) {
+            return new TypeArgument.Type((TypeExpr) visit(ctx.typeExpr()));
+        }
+
+        @Override
+        public Object visitTypeArgumentWildcard(JasperParser.TypeArgumentWildcardContext ctx) {
+            return new TypeArgument.Wildcard((WildcardType) visit(ctx.wildcard()));
+        }
+
+        @Override
+        public Object visitTypeWildcard(JasperParser.TypeWildcardContext ctx) {
+            // '?' ((Extends|Super) typeExpr)?
+            if (ctx.typeExpr() == null) {
+                return new WildcardType(null, null);
+            }
+            String kw = ctx.getChild(1).getText();
+            WildcardType.BoundKind bk = "extends".equals(kw) ? WildcardType.BoundKind.EXTENDS : WildcardType.BoundKind.SUPER;
+            return new WildcardType(bk, (TypeExpr) visit(ctx.typeExpr()));
+        }
+
+        @Override
+        public Object visitTypeParameters(JasperParser.TypeParametersContext ctx) {
+            List<TypeParameter> ps = new ArrayList<>();
+            for (JasperParser.TypeParameterContext p : ctx.typeParameter()) {
+                ps.add((TypeParameter) visit(p));
+            }
+            return new TypeParameters(ps);
+        }
+
+        @Override
+        public Object visitTypeParam(JasperParser.TypeParamContext ctx) {
+            TypeBound b = null;
+            if (ctx.typeBound() != null) {
+                b = (TypeBound) visit(ctx.typeBound());
+            }
+            return new TypeParameter(ctx.Identifier().getText(), b);
+        }
+
+        @Override
+        public Object visitTypeBoundAlternative(JasperParser.TypeBoundAlternativeContext ctx) {
+            String kw = ctx.getChild(0).getText();
+            TypeBound.Kind k = "extends".equals(kw) ? TypeBound.Kind.EXTENDS : TypeBound.Kind.SUPER;
+            List<TypeExpr> bounds = new ArrayList<>();
+            for (JasperParser.TypeExprContext t : ctx.typeExpr()) {
+                bounds.add((TypeExpr) visit(t));
+            }
+            return new TypeBound(k, bounds);
+        }
+
+// ---------------------------
+// v0.0.04：where 子句（where T is NonNull, ...）
+// ---------------------------
+
+@Override
+public Object visitWhereClause(JasperParser.WhereClauseContext ctx) {
+    List<WhereConstraint> cs = new ArrayList<>();
+    for (JasperParser.WhereConstraintContext c : ctx.whereConstraint()) {
+        cs.add((WhereConstraint) visit(c));
+    }
+    return new WhereClause(cs, span(ctx));
+}
+
+@Override
+public Object visitWhereConstraint(JasperParser.WhereConstraintContext ctx) {
+    Identifier tp = new Identifier(ctx.name.getText(), spanFromToken(ctx.name));
+    Identifier cons = new Identifier(ctx.constraint.getText(), spanFromToken(ctx.constraint));
+    return new WhereConstraint(tp, cons, span(ctx));
+}
+
+        // ===========================
+        // statements / blocks (v0.0.04)
+        // ===========================
+
+        @Override
+        public Object visitBlock(JasperParser.BlockContext ctx) {
+            // block : '{' blockStatement* '}'
+            List<Stmt> stmts = new ArrayList<>();
+            for (JasperParser.BlockStatementContext bs : ctx.blockStatement()) {
+                Object o = visit(bs);
+                if (o == null) continue;
+                if (o instanceof Stmt) {
+                    stmts.add((Stmt) o);
+                } else if (o instanceof List) {
+                    @SuppressWarnings("unchecked")
+                    List<Stmt> ss = (List<Stmt>) o;
+                    stmts.addAll(ss);
+                } else {
+                    diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "unsupported block statement", span(bs));
+                }
+            }
+            return new BlockStmt(stmts, span(ctx));
+        }
+
+        @Override
+        public Object visitBlockStatementLocalVariable(JasperParser.BlockStatementLocalVariableContext ctx) {
+            // localVariableDeclarationStatement -> localVariableDeclaration
+            return visit(ctx.localVariableDeclarationStatement());
+        }
+
+        @Override
+        public Object visitBlockStatementStatement(JasperParser.BlockStatementStatementContext ctx) {
+            return visit(ctx.statement());
+        }
+
+        @Override
+        public Object visitBlockStatementClassDeclaration(JasperParser.BlockStatementClassDeclarationContext ctx) {
+            diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "local class/enum declaration in block not supported in this stage", span(ctx));
+            return null;
+        }
+
+        @Override
+        public Object visitStatementBlock(JasperParser.StatementBlockContext ctx) {
+            return visit(ctx.block());
+        }
+
+        @Override
+        public Object visitStatementEmpty(JasperParser.StatementEmptyContext ctx) {
+            // 空语句；忽略
+            return null;
+        }
+
+        @Override
+        public Object visitStatementExpressionStatement(JasperParser.StatementExpressionStatementContext ctx) {
+            JasperParser.StatementExpressionContext sex = ctx.expressionStatement().statementExpression();
+            if (!(sex instanceof JasperParser.StatementExpressionAnyContext)) {
+                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "only simple expression statement supported in this stage", span(sex));
+                return null;
+            }
+            Expr e = (Expr) visit(((JasperParser.StatementExpressionAnyContext) sex).expression());
+            if (e == null) return null;
+            return new ExprStmt(e, span(ctx));
+        }
+
+        @Override
+        public Object visitStatementIf(JasperParser.StatementIfContext ctx) {
+            return visit(ctx.ifStatement());
+        }
+
+        @Override
+        public Object visitIfStatement(JasperParser.IfStatementContext ctx) {
+            Expr cond = (Expr) visit(ctx.expression());
+            BlockStmt thenBlk = (BlockStmt) visit(ctx.block());
+            Stmt elseBranch = null;
+            if (ctx.elseClause() != null) {
+                elseBranch = (Stmt) visit(ctx.elseClause());
+            }
+            if (cond == null || thenBlk == null) return null;
+            return new IfStmt(cond, thenBlk, elseBranch, span(ctx));
+        }
+
+        @Override
+        public Object visitElseClause(JasperParser.ElseClauseContext ctx) {
+            // Else (ifStatement | block)
+            if (ctx.ifStatement() != null) {
+                return visit(ctx.ifStatement());
+            }
+            if (ctx.block() != null) {
+                return visit(ctx.block());
+            }
+            return null;
+        }
+
+        @Override
+        public Object visitLocalVariableDeclarationStatement(JasperParser.LocalVariableDeclarationStatementContext ctx) {
+            return visit(ctx.localVariableDeclaration());
+        }
+
+        @Override
+        public Object visitLocalVariableDeclaration(JasperParser.LocalVariableDeclarationContext ctx) {
+            boolean isLate = false;
+            for (JasperParser.ModifierContext m : ctx.modifier()) {
+                if (m.softLate() != null) {
+                    isLate = true;
+                }
+            }
+
+            VarDeclStmt.Kind kind;
+            if (ctx.kind.getType() == JasperParser.Var) {
+                kind = VarDeclStmt.Kind.VAR;
+            } else if (ctx.kind.getType() == JasperParser.Const) {
+                kind = VarDeclStmt.Kind.CONST;
+            } else {
+                kind = VarDeclStmt.Kind.POINTER;
+            }
+
+            List<Stmt> decls = new ArrayList<>();
+            for (JasperParser.VarDeclaratorContext vd : ctx.decls) {
+                JasperParser.MaybeTypedBindingContext b = vd.maybeTypedBinding();
+                Identifier name = new Identifier(b.name.getText(), spanFromToken(b.name));
+
+                TypeRef ty = null;
+                if (b.typeRef != null) {
+                    ty = buildTypeRef(b.typeRef);
+                }
+
+                Expr init = null;
+                if (vd.expression() != null) {
+                    init = (Expr) visit(vd.expression());
+                }
+
+                decls.add(new VarDeclStmt(kind, isLate, name, ty, init, span(vd)));
+            }
+            return decls;
         }
 
         // ===========================
@@ -278,22 +774,76 @@ public final class AstBuilder {
 
         @Override
         public Object visitAssignExprAssignment(JasperParser.AssignExprAssignmentContext ctx) {
-            diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "assignment is not supported in this stage", span(ctx));
-            return null;
+            // v0.0.04：仅支持最小赋值：Identifier '=' expression。
+            JasperParser.AssignmentContext a = ctx.assignment();
+            if (!(a.leftHandSide() instanceof JasperParser.LeftHandSideExpressionNameContext)) {
+                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "only name assignment supported", span(ctx));
+                return null;
+            }
+            JasperParser.LeftHandSideExpressionNameContext lhs = (JasperParser.LeftHandSideExpressionNameContext) a.leftHandSide();
+            String qn = lhs.qualifiedName().getText();
+            if (qn.indexOf('.') >= 0) {
+                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "qualified assignment not supported yet: " + qn, span(ctx));
+                return null;
+            }
+            // only '='
+            if (!"=".equals(a.assignmentOperator().getText())) {
+                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "only '=' assignment supported", span(ctx));
+                return null;
+            }
+            Identifier id = new Identifier(qn, span(lhs));
+            VarRefExpr l = new VarRefExpr(id, span(lhs));
+            Expr rhs = (Expr) visit(a.expression());
+            if (rhs == null) return null;
+            return new AssignExpr(l, rhs, span(ctx));
         }
-
-        @Override
+@Override
         public Object visitCondBinary(JasperParser.CondBinaryContext ctx) {
-            return visit(ctx.binaryExpression());
+            // v0.0.04：conditionalExpression 的最底层现在是 nullFallbackExpression
+            // - nullFallbackExpression: a else b 语法糖（等价于 (a) ?? b）
+            // - nullCoalesceExpression: x ?? y
+            return visit(ctx.nullFallbackExpression());
         }
 
-        @Override
+@Override
         public Object visitCondTernary(JasperParser.CondTernaryContext ctx) {
             diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "ternary is not supported in this stage", span(ctx));
             return null;
         }
 
+        
+
+        // ---------------------------
+        // v0.0.04：空值相关表达式：?? 与 `else` 语法糖
+        // ---------------------------
+
         @Override
+        public Object visitNullFallbackExpression(JasperParser.NullFallbackExpressionContext ctx) {
+            // nullFallbackExpression : nullCoalesceExpression (Else nullCoalesceExpression)?
+            Expr left = (Expr) visit(ctx.nullCoalesceExpression(0));
+            if (left == null) return null;
+            if (ctx.Else() == null) {
+                return left;
+            }
+            Expr right = (Expr) visit(ctx.nullCoalesceExpression(1));
+            if (right == null) return null;
+            // 语法糖：a else b  ≡ (a) ?? b
+            return new NullCoalesceExpr(left, right, span(ctx));
+        }
+
+        @Override
+        public Object visitNullCoalesceExpression(JasperParser.NullCoalesceExpressionContext ctx) {
+            // nullCoalesceExpression : binaryExpression (NULL_COALESCE binaryExpression)*
+            Expr cur = (Expr) visit(ctx.binaryExpression(0));
+            if (cur == null) return null;
+            for (int i = 1; i < ctx.binaryExpression().size(); i++) {
+                Expr rhs = (Expr) visit(ctx.binaryExpression(i));
+                if (rhs == null) return null;
+                cur = new NullCoalesceExpr(cur, rhs, span(ctx));
+            }
+            return cur;
+        }
+@Override
         public Object visitBinaryUnary(JasperParser.BinaryUnaryContext ctx) {
             return visit(ctx.unaryExpression());
         }
@@ -328,11 +878,24 @@ public final class AstBuilder {
 
         @Override
         public Object visitBinaryEquality(JasperParser.BinaryEqualityContext ctx) {
-            diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "equality is not supported in this stage", span(ctx));
-            return null;
+            // v0.0.04：支持 == / != (用于空值收窄)
+            Expr left = (Expr) visit(ctx.binaryExpression());
+            Expr right = (Expr) visit(ctx.unaryExpression());
+            if (left == null || right == null) return null;
+
+            BinaryExpr.Op op;
+            if (ctx.op.getType() == JasperParser.EQUAL_EQUAL) {
+                op = BinaryExpr.Op.EQ;
+            } else if (ctx.op.getType() == JasperParser.NOT_EQUAL) {
+                op = BinaryExpr.Op.NE;
+            } else {
+                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "unknown equality operator", span(ctx));
+                return null;
+            }
+            return new BinaryExpr(left, op, right, span(ctx));
         }
 
-        @Override
+@Override
         public Object visitBinaryBitAnd(JasperParser.BinaryBitAndContext ctx) {
             diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "bitand is not supported in this stage", span(ctx));
             return null;
@@ -396,42 +959,82 @@ public final class AstBuilder {
 
         @Override
         public Object visitPrimaryChain(JasperParser.PrimaryChainContext ctx) {
-            // 只实现最小子集：
-            // - primaryAtomName (qualifiedName) + arguments  => CallExpr
-            // - primaryAtomName (qualifiedName)             => VarRefExpr
-            // - literal decimal                              => IntLitExpr
-            Expr base = (Expr) visit(ctx.primaryAtom());
-            if (base == null) return null;
+            // v0.0.04：扩展 primary 链，支持：
+            // - 顶层函数调用：foo(...)
+            // - 成员访问/安全访问：a.b / a?.b
+            // - 方法调用/安全调用：a.f(...) / a?.f(...)
+            // - 非空断言后缀：x!
+            Expr cur = (Expr) visit(ctx.primaryAtom());
+            if (cur == null) return null;
 
-            // 目前仅支持“名字/字面量作为 base”，再接一个 call 后缀
-            if (ctx.primarySuffix().isEmpty()) {
-                return base;
-            }
-
-            // 只允许一个后缀，并且必须是 call
-            if (ctx.primarySuffix().size() != 1 || !(ctx.primarySuffix(0) instanceof JasperParser.PrimarySuffixCallContext)) {
-                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "only a single call suffix is supported in this stage", span(ctx));
-                return null;
-            }
-
-            if (!(base instanceof VarRefExpr)) {
-                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "call base must be a name", span(ctx));
-                return null;
-            }
-
-            JasperParser.PrimarySuffixCallContext call = (JasperParser.PrimarySuffixCallContext) ctx.primarySuffix(0);
-            List<Expr> args = new ArrayList<>();
-            if (call.arguments().exprList() != null) {
-                for (JasperParser.ExpressionContext ectx : call.arguments().exprList().expression()) {
-                    Expr a = (Expr) visit(ectx);
-                    if (a == null) return null;
-                    args.add(a);
+            for (JasperParser.PrimarySuffixContext s : ctx.primarySuffix()) {
+                if (s instanceof JasperParser.PrimarySuffixCallContext) {
+                    // foo(...)：仅允许 name 作为 callee（兼容 day2 demo/backend）
+                    if (!(cur instanceof VarRefExpr)) {
+                        diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "call base must be a name", span(s));
+                        return null;
+                    }
+                    JasperParser.PrimarySuffixCallContext call = (JasperParser.PrimarySuffixCallContext) s;
+                    List<Expr> args = new ArrayList<>();
+                    if (call.arguments().exprList() != null) {
+                        for (JasperParser.ExpressionContext ectx : call.arguments().exprList().expression()) {
+                            Expr a = (Expr) visit(ectx);
+                            if (a == null) return null;
+                            args.add(a);
+                        }
+                    }
+                    Identifier callee = ((VarRefExpr) cur).name;
+                    cur = new CallExpr(callee, args, span(s));
+                    continue;
                 }
+
+                if (s instanceof JasperParser.PrimarySuffixDotContext || s instanceof JasperParser.PrimarySuffixSafeDotContext) {
+                    boolean isSafe = s instanceof JasperParser.PrimarySuffixSafeDotContext;
+
+                    Token idTok;
+                    JasperParser.ArgumentsContext argsCtx;
+                    if (s instanceof JasperParser.PrimarySuffixDotContext) {
+                        JasperParser.PrimarySuffixDotContext d = (JasperParser.PrimarySuffixDotContext) s;
+                        idTok = d.Identifier().getSymbol();
+                        argsCtx = d.arguments();
+                    } else {
+                        JasperParser.PrimarySuffixSafeDotContext d = (JasperParser.PrimarySuffixSafeDotContext) s;
+                        idTok = d.Identifier().getSymbol();
+                        argsCtx = d.arguments();
+                    }
+
+                    Identifier member = new Identifier(idTok.getText(), spanFromToken(idTok));
+
+                    if (argsCtx == null) {
+                        cur = new MemberAccessExpr(cur, member, isSafe, span(s));
+                    } else {
+                        List<Expr> args = new ArrayList<>();
+                        if (argsCtx.exprList() != null) {
+                            for (JasperParser.ExpressionContext ectx : argsCtx.exprList().expression()) {
+                                Expr a = (Expr) visit(ectx);
+                                if (a == null) return null;
+                                args.add(a);
+                            }
+                        }
+                        cur = new MethodCallExpr(cur, member, args, isSafe, span(s));
+                    }
+                    continue;
+                }
+
+                if (s instanceof JasperParser.PrimarySuffixNotNullAssertContext) {
+                    cur = new NotNullAssertExpr(cur, span(s));
+                    continue;
+                }
+
+                // 其它后缀（索引/new-after-dot...）本阶段不支持
+                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "primary suffix not supported in this stage", span(s));
+                return null;
             }
 
-            Identifier callee = ((VarRefExpr) base).name;
-            return new CallExpr(callee, args, span(ctx));
+            return cur;
         }
+
+
 
         @Override
         public Object visitPrimaryAtomName(JasperParser.PrimaryAtomNameContext ctx) {
@@ -448,20 +1051,23 @@ public final class AstBuilder {
 
         @Override
         public Object visitPrimaryAtomLiteral(JasperParser.PrimaryAtomLiteralContext ctx) {
-            // 只支持十进制整数：DEC_LITERAL（对应 grammar 的 DEC_LITERAL token）
             JasperParser.LiteralContext lit = ctx.literal();
-            if (!(lit instanceof JasperParser.DecimalLiteralContext)) {
-                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "only decimal integer literal supported", span(ctx));
-                return null;
+            // v0.0.04：支持 int 字面量 + null
+            if (lit instanceof JasperParser.DecimalLiteralContext) {
+                String text = ((JasperParser.DecimalLiteralContext) lit).DEC_LITERAL().getText();
+                try {
+                    long v = Long.parseLong(text);
+                    return new IntLitExpr(v, span(ctx));
+                } catch (NumberFormatException nfe) {
+                    diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "integer literal out of range: " + text, span(ctx));
+                    return null;
+                }
             }
-            String text = ((JasperParser.DecimalLiteralContext) lit).DEC_LITERAL().getText();
-            try {
-                long v = Long.parseLong(text);
-                return new IntLitExpr(v, span(ctx));
-            } catch (NumberFormatException nfe) {
-                diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "integer literal out of range: " + text, span(ctx));
-                return null;
+            if (lit instanceof JasperParser.NullLiteralContext) {
+                return new NullLitExpr(span(ctx));
             }
+            diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "literal not supported in this stage", span(ctx));
+            return null;
         }
 
         @Override

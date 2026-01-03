@@ -256,9 +256,9 @@ topLevelItem
 topLevelDecl
     : (normalClassDeclaration | enumDeclaration)                               #TopDeclarationClass
     | (normalInterfaceDeclaration | annotationTypeDeclaration)                 #TopDeclarationInterface
-    | mods=modifier* Function name=Identifier
+    | mods=modifier* Function name=Identifier tparams=typeParameters?
       '(' (params+=typedBinding (',' params+=typedBinding)* ','?)? ')'
-      ret=functionReturnType? thr=throws_? body=methodBody                     #TopDeclarationFunction
+      ret=functionReturnType? thr=throws_? where=whereClause? body=methodBody  #TopDeclarationFunction
     | ';'                                                                      #TopDeclarationEmptyDeclaration
     | topLevelVariableDeclaration                                              #TopDeclarationVariable
     ;
@@ -342,6 +342,17 @@ softWhen     : softKeyword["when"] ;
  */
 //graph::softThen #@rule 说明：软关键字：softThen，通过 Identifier+谓词匹配固定文本。
 softThen     : softKeyword["then"] ;
+
+//graph::softWhere #@rule 说明：软关键字：softWhere，用于泛型 where 子句。
+softWhere    : softKeyword["where"] ;
+
+//graph::softIs #@rule 说明：软关键字：softIs，用于 where 约束：T is NonNull。
+softIs
+    : Is
+    | softKeyword["is"]
+    ;
+//graph::softLate #@rule 说明：软关键字：softLate，用于延迟赋值：late var x: T。
+softLate     : softKeyword["late"] ;
 
 /*
  * 规则：softLabel
@@ -1019,6 +1030,24 @@ typeBound
     ;
 
 /*
+ * 规则：whereClause
+ * 所属分块：06 类型系统
+ * 用途：泛型约束：where T is NonNull, U is NonNull ...
+ * 说明：
+ *   - 本阶段仅引入最小语法形态：where <TypeParamName> is <ConstraintName>
+ *   - 约束名本阶段仅在语义层支持 NonNull（语法层仍然按 Identifier 解析）。
+ */
+//graph::whereClause #@keep #@hook 说明：泛型 where 子句。
+whereClause
+    : softWhere whereConstraint (',' whereConstraint)*
+    ;
+
+//graph::whereConstraint #@rule 说明：where 子句单条约束：T is NonNull。
+whereConstraint
+    : name=Identifier (Is | softIs) constraint=Identifier
+    ;
+
+/*
  * 规则：wildcard
  * 所属分块：06 类型系统
  * 用途：语法节点：wildcard。
@@ -1084,6 +1113,7 @@ modifier
     | Defer
     | Lock
     | Atomic
+    | softLate
     ;
 
 /*
@@ -1506,8 +1536,8 @@ getterOnlyBlock
 //graph::methodDeclaration #@rule 说明：声明节点：methodDeclaration。
 methodDeclaration
     : mods=modifier* header=methodHeader body=methodBody                                      #MethodDeclarationJavaStyle
-    | mods=modifier* Function name=Identifier '(' ( params+=typedBinding (',' params+=typedBinding)* ','? )? ')'
-      ret=functionReturnType? thr=throws_? body=methodBody                                    #MethodDeclarationFunctionStyle
+    | mods=modifier* Function name=Identifier tparams=typeParameters? '(' ( params+=typedBinding (',' params+=typedBinding)* ','? )? ')'
+      ret=functionReturnType? thr=throws_? where=whereClause? body=methodBody                 #MethodDeclarationFunctionStyle
     ;
 
 /*
@@ -2604,6 +2634,8 @@ primary
 primarySuffix
     : arguments                                        #PrimarySuffixCall
     | '.' typeArguments? Identifier arguments?          #PrimarySuffixDot
+    | SAFE_DOT typeArguments? Identifier arguments?     #PrimarySuffixSafeDot
+    | '!'                                              #PrimarySuffixNotNullAssert
     | '[' expression ']'                               #PrimarySuffixIndex
     | classInstanceCreationExpressionAfterDot           #PrimarySuffixNewAfterDot
     ;
@@ -2920,8 +2952,18 @@ assignmentExpression
  */
 //graph::conditionalExpression #@rule 说明：表达式节点：conditionalExpression。
 conditionalExpression
-    : binaryExpression                                            #CondBinary
-    | binaryExpression '?' expression ':' conditionalExpression    #CondTernary
+    : nullFallbackExpression                                            #CondBinary
+    | nullFallbackExpression '?' expression ':' conditionalExpression    #CondTernary
+    ;
+
+//graph::nullCoalesceExpression #@rule 说明：空合并（??），优先级介于 binary 与 conditional 之间。
+nullCoalesceExpression
+    : binaryExpression (NULL_COALESCE binaryExpression)*
+    ;
+
+//graph::nullFallbackExpression #@rule 说明：语法糖：a?.b else c  ≡ (a?.b) ?? c
+nullFallbackExpression
+    : nullCoalesceExpression (Else nullCoalesceExpression)?
     ;
 
 

@@ -16,12 +16,15 @@ import java.util.List;
  */
 public final class ClassDecl implements Item {
     public final Identifier name;
+    /** class 的泛型参数（可能为空） */
+    public final TypeParameters typeParameters;
     public final List<TypeRef> implementsTypes;
     public final List<ClassMember> members;
     public final Span span;
 
-    public ClassDecl(Identifier name, List<TypeRef> implementsTypes, List<ClassMember> members, Span span) {
+    public ClassDecl(Identifier name, TypeParameters typeParameters, List<TypeRef> implementsTypes, List<ClassMember> members, Span span) {
         this.name = name;
+        this.typeParameters = typeParameters;
         this.implementsTypes = implementsTypes == null ? Collections.<TypeRef>emptyList() : Collections.unmodifiableList(implementsTypes);
         this.members = members == null ? Collections.<ClassMember>emptyList() : Collections.unmodifiableList(members);
         this.span = span;

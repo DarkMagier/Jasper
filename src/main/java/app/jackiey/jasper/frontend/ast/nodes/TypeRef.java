@@ -3,21 +3,32 @@ package app.jackiey.jasper.frontend.ast.nodes;
 import app.jackiey.jasper.frontend.ast.span.Span;
 
 /**
- * 类型引用（最小 AST 版本）。
+ * 类型引用（结构化 AST 版本）。
  *
- * 约束说明（非常重要）：
- * - ASTBuilder 必须基于 ANTLR Visitor 从解析树构建 AST。
- * - typeExpr 在语法上非常丰富（泛型、数组、nullable 等），本轮先保留“原文本 + Span”。
- * - text 直接来自对应的 parse tree 节点（例如 ctx.typeExpr().getText()），
- *   这仍然是 parser 输出的 token 串，不是手写扫描/二次解析。
+ * 关键约束：
+ * - ASTBuilder 必须基于 ANTLR Visitor/parse tree 构建结构化 AST。
+ * - 禁止对 ctx.getText() 做 split/regex 来“模拟类型解析”。
+ *
+ * 说明：
+ * - TypeRef 对应 grammar 的 typeExpr（支持 union：A | B）。
+ * - 每个 union 分支是一个 TypePostfix（typeAtom + suffix + qualifier）。
  */
 public final class TypeRef {
-    /** 例如：int64 / String / List<Int32>[]? */
-    public final String text;
+    public final TypeExpr expr;
     public final Span span;
 
-    public TypeRef(String text, Span span) {
-        this.text = text;
+    public TypeRef(TypeExpr expr, Span span) {
+        this.expr = expr;
         this.span = span;
+    }
+
+    /**
+     * 以“接近源码”的形式重建一个文本（用于调试/后端 name mangle）。
+     *
+     * 注意：
+     * - 这里是从结构化节点拼回字符串，不涉及二次解析。
+     */
+    public String toDebugString() {
+        return expr == null ? "<null>" : expr.toDebugString();
     }
 }

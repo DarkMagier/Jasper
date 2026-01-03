@@ -80,6 +80,8 @@ public final class AstToCgir {
                 emitClassStubs((ClassDecl) it, out);
             } else if (it instanceof InterfaceDecl) {
                 emitInterfaceStubs((InterfaceDecl) it, out);
+            } else if (it instanceof EnumDecl) {
+                emitEnumStubs((EnumDecl) it, out);
             } else {
                 diag.error(ErrorCode.UNSUPPORTED_SYNTAX, "Unknown item type");
                 return new CgProgram(Collections.<CgFunction>emptyList());
@@ -142,9 +144,16 @@ public final class AstToCgir {
         // class 本体 marker
         out.add(stub("__type$" + c));
 
+        // 泛型参数 marker：仅作为统一内部表示，暂不做语义检查
+        if (cd.typeParameters != null) {
+            for (TypeParameter p : cd.typeParameters.params) {
+                out.add(stub("__typeParam$" + c + "$" + mangle(p.name)));
+            }
+        }
+
         // implements markers
         for (TypeRef t : cd.implementsTypes) {
-            out.add(stub("__implements$" + c + "$" + mangle(t.text)));
+            out.add(stub("__implements$" + c + "$" + mangle(t.toDebugString())));
         }
 
         // members
@@ -165,8 +174,47 @@ public final class AstToCgir {
         // interface marker
         out.add(stub("__iface$" + i));
 
+        // 泛型参数 marker
+        if (id.typeParameters != null) {
+            for (TypeParameter p : id.typeParameters.params) {
+                out.add(stub("__ifaceTypeParam$" + i + "$" + mangle(p.name)));
+            }
+        }
+
+        // extends markers
+        for (TypeRef t : id.extendsTypes) {
+            out.add(stub("__ifaceExtends$" + i + "$" + mangle(t.toDebugString())));
+        }
+
         for (MethodDecl m : id.methods) {
             out.add(stub("__ifaceMethod$" + i + "$" + mangle(m.name.text)));
+        }
+    }
+
+    private void emitEnumStubs(EnumDecl ed, List<CgFunction> out) {
+        String e = mangle(ed.name.text);
+        out.add(stub("__enum$" + e));
+
+        for (TypeRef t : ed.implementsTypes) {
+            out.add(stub("__enumImplements$" + e + "$" + mangle(t.toDebugString())));
+        }
+
+        for (EnumDecl.EnumConstant c : ed.constants) {
+            out.add(stub("__enumConst$" + e + "$" + mangle(c.name.text)));
+        }
+
+        // enum body declarations: 复用 class member 统一 marker 思路
+        for (ClassMember m : ed.bodyMembers) {
+            if (m instanceof FieldDecl) {
+                FieldDecl f = (FieldDecl) m;
+                out.add(stub("__enumField$" + e + "$" + mangle(f.name.text)));
+            } else if (m instanceof MethodDecl) {
+                MethodDecl md = (MethodDecl) m;
+                out.add(stub("__enumMethod$" + e + "$" + mangle(md.name.text)));
+            } else if (m instanceof EnumDecl) {
+                // nested enum: 递归 emit
+                emitEnumStubs((EnumDecl) m, out);
+            }
         }
     }
 
@@ -185,15 +233,35 @@ public final class AstToCgir {
      */
     private static String mangle(String s) {
         if (s == null || s.isEmpty()) return "_";
-        StringBuilder sb = new StringBuilder();
+        // 规则：保留 [A-Za-z0-9_]，其它字符统一替换为 '$'。
+        // 为了让符号更稳定/可读：
+        // - 连续多个 '$' 压缩为单个
+        // - 去掉首尾 '$'
+        StringBuilder raw = new StringBuilder();
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
-                sb.append(c);
+                raw.append(c);
             } else {
-                sb.append('$');
+                raw.append('$');
             }
         }
-        return sb.toString();
+        // compress
+        StringBuilder sb = new StringBuilder();
+        boolean lastDollar = false;
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (c == '$') {
+                if (!lastDollar) sb.append('$');
+                lastDollar = true;
+            } else {
+                sb.append(c);
+                lastDollar = false;
+            }
+        }
+        // trim
+        while (sb.length() > 0 && sb.charAt(0) == '$') sb.deleteCharAt(0);
+        while (sb.length() > 0 && sb.charAt(sb.length() - 1) == '$') sb.deleteCharAt(sb.length() - 1);
+        return sb.length() == 0 ? "_" : sb.toString();
     }
 }

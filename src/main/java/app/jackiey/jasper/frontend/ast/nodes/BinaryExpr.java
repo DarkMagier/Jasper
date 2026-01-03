@@ -12,7 +12,9 @@ import app.jackiey.jasper.frontend.ast.span.Span;
 public final class BinaryExpr implements Expr {
     public enum Op {
         ADD,
-        SUB
+        SUB,
+        EQ,
+        NE
     }
 
     public final Expr left;

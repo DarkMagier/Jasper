@@ -16,11 +16,17 @@ import java.util.List;
  */
 public final class InterfaceDecl implements Item {
     public final Identifier name;
+    /** interface 的泛型参数（可能为空） */
+    public final TypeParameters typeParameters;
+    /** interface extends 列表（可能为空） */
+    public final List<TypeRef> extendsTypes;
     public final List<MethodDecl> methods;
     public final Span span;
 
-    public InterfaceDecl(Identifier name, List<MethodDecl> methods, Span span) {
+    public InterfaceDecl(Identifier name, TypeParameters typeParameters, List<TypeRef> extendsTypes, List<MethodDecl> methods, Span span) {
         this.name = name;
+        this.typeParameters = typeParameters;
+        this.extendsTypes = extendsTypes == null ? Collections.<TypeRef>emptyList() : Collections.unmodifiableList(extendsTypes);
         this.methods = methods == null ? Collections.<MethodDecl>emptyList() : Collections.unmodifiableList(methods);
         this.span = span;
     }

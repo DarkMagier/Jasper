@@ -43,8 +43,8 @@ public final class ByteBuddyBackend {
                 }
 
                 if (AstToCgir.ENTRY.equals(fn.name)) {
-                    // __entry() { call foo(immA,immB) } via reflection helper
-                    long a = 1, bb = 2;
+                    // __entry()：若 IR 中含 Call2I64 则执行调用；否则为空函数（RetVoid）。
+                    Long a = null, bb = null;
                     for (CgInst inst : fn.body) {
                         if (inst instanceof CgInst.Call2I64) {
                             CgInst.Call2I64 c = (CgInst.Call2I64) inst;
@@ -52,7 +52,13 @@ public final class ByteBuddyBackend {
                             bb = c.b;
                         }
                     }
-                    impl = MethodCall.invoke(call2).with(GEN_CLASS, "foo", a, bb);
+
+                    if (a != null && bb != null) {
+                        impl = MethodCall.invoke(call2).with(GEN_CLASS, "foo", a, bb);
+                    } else {
+                        impl = StubMethod.INSTANCE;
+                    }
+
                     b = b.defineMethod(AstToCgir.ENTRY, void.class, Visibility.PUBLIC, Ownership.STATIC)
                             .intercept(impl);
                     continue;

@@ -22,20 +22,7 @@
             <groupId>org.antlr</groupId>
             <artifactId>antlr4-runtime</artifactId>
             <version>${antlr4.version}</version>
-        </dependency>
-
-        <dependency>
-            <groupId>org.bytedeco</groupId>
-            <artifactId>javacv-platform</artifactId>
-            <version>1.5.12</version>
-        </dependency>
-        <dependency>
-            <groupId>org.bytedeco</groupId>
-            <artifactId>llvm-platform</artifactId>
-            <version>20.1.7-1.5.12</version>
-        </dependency>
-
-        <dependency>
+        </dependency><dependency>
             <groupId>net.bytebuddy</groupId>
             <artifactId>byte-buddy</artifactId>
             <version>1.18.3</version>
